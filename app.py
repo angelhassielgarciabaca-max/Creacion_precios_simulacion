@@ -1,4 +1,3 @@
-
 # ==============================================================================
 # PROYECTO: QUANTMARKET TERMINAL & SIMULADOR DE MONTE CARLO (MULTIJUGADOR EN VIVO)
 # Plataforma interactiva multiusuario de Finanzas Cuantitativas & Microestructura
