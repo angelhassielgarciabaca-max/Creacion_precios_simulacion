@@ -458,21 +458,32 @@ def create_order_book_depth_chart(order_book):
         fillcolor="rgba(244, 63, 94, 0.20)", name="Asks (Oferta)"
     ))
 
-    # Bloques destacados
-    b_blocks = [b for b in bids if b.get("is_block")]
-    a_blocks = [a for a in asks if a.get("is_block")]
-    if b_blocks:
-        fig.add_trace(go.Scatter(
-            x=[b["price"] for b in b_blocks], y=[b["cum"] for b in b_blocks],
-            mode="markers+text", marker=dict(symbol="star", size=11, color="#fbbf24"),
-            text=[f"🧱 Soporte {b['volume']}u" for b in b_blocks], textposition="top right", name="Muro Soporte"
-        ))
-    if a_blocks:
-        fig.add_trace(go.Scatter(
-            x=[a["price"] for a in a_blocks], y=[a["cum"] for a in a_blocks],
-            mode="markers+text", marker=dict(symbol="star", size=11, color="#fbbf24"),
-            text=[f"🧱 Muro {a['volume']}u" for a in a_blocks], textposition="top left", name="Muro Resistencia"
-        ))
+    # Bloques destacados (obtenidos desde el DataFrame con la columna 'cum')
+    if not df_b.empty and "is_block" in df_b.columns:
+        b_blocks = df_b[df_b["is_block"] == True]
+        if not b_blocks.empty:
+            fig.add_trace(go.Scatter(
+                x=b_blocks["price"].tolist(),
+                y=b_blocks["cum"].tolist(),
+                mode="markers+text",
+                marker=dict(symbol="star", size=11, color="#fbbf24"),
+                text=[f"🧱 Soporte {int(v)}u" for v in b_blocks["volume"]],
+                textposition="top right",
+                name="Muro Soporte"
+            ))
+
+    if not df_a.empty and "is_block" in df_a.columns:
+        a_blocks = df_a[df_a["is_block"] == True]
+        if not a_blocks.empty:
+            fig.add_trace(go.Scatter(
+                x=a_blocks["price"].tolist(),
+                y=a_blocks["cum"].tolist(),
+                mode="markers+text",
+                marker=dict(symbol="star", size=11, color="#fbbf24"),
+                text=[f"🧱 Muro {int(v)}u" for v in a_blocks["volume"]],
+                textposition="top left",
+                name="Muro Resistencia"
+            ))
 
     fig.update_layout(
         template="plotly_dark",
