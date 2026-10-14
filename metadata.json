@@ -1,0 +1,6 @@
+{
+  "name": "QuantMarket Terminal & Monte Carlo Simulator",
+  "description": "Terminal interactiva de Finanzas Cuantitativas: Estructura de Mercado, Libros de Órdenes, Bloques de Liquidez y Simulación de Monte Carlo (10,000 trayectorias MGB) con código listo para Streamlit Community Cloud.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
