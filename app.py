@@ -188,15 +188,31 @@ class SharedMarketEngine:
         self.current_price = 100.00
         self.s0_frozen = 100.00
         self.market_paused = False
+        self.mm_enabled = True
         self.price_history = []
         self.order_book = {"bids": [], "asks": []}
         self.trade_tape = []
         self.monte_carlo_results = None
         self.total_trades_count = 0
+        self.last_mm_tick = 0.0
         self.version = 0
 
         # Inicialización de historial y liquidez
         self._seed_initial_market()
+
+        # Hilo de fondo permanente para generar órdenes de Market Makers continuamente
+        self._bg_thread = threading.Thread(target=self._background_market_maker_worker, daemon=True)
+        self._bg_thread.start()
+
+    def _background_market_maker_worker(self):
+        """Genera órdenes y actualiza el libro continuamente en segundo plano."""
+        while True:
+            time.sleep(2.0)
+            if not self.market_paused and self.mm_enabled:
+                try:
+                    self.auto_market_maker_tick(force=True)
+                except Exception:
+                    pass
 
     def _seed_initial_market(self):
         base_price = 100.00
@@ -225,29 +241,27 @@ class SharedMarketEngine:
         self.s0_frozen = self.current_price
         self.refresh_liquidity_locked()
         self.trade_tape = [
-            {"time": datetime.datetime.now().strftime("%H:%M:%S"), "trader": "Sistema", "side": "BUY", "price": 100.05, "qty": 150, "type": "MKT"},
-            {"time": datetime.datetime.now().strftime("%H:%M:%S"), "trader": "MarketMaker", "side": "SELL", "price": 99.95, "qty": 80, "type": "LMT"},
+            {"time": datetime.datetime.now().strftime("%H:%M:%S"), "trader": "MM_Citadel", "side": "BUY", "price": 100.05, "qty": 150, "type": "MKT"},
+            {"time": datetime.datetime.now().strftime("%H:%M:%S"), "trader": "Quant_Bot", "side": "SELL", "price": 99.95, "qty": 80, "type": "LMT"},
         ]
 
     def refresh_liquidity_locked(self):
-        mid = self.current_price
+        """Mantiene 10 niveles de compra y 10 niveles de venta activos con volumen realista y bloques institucionales dinámicos."""
+        mid = round(self.current_price, 2)
         bids, asks = [], []
-        special_bid = 3
-        special_ask = 4
+        # Bloques institucionales dinámicos rotativos (niveles 2 a 5)
+        special_bid = int(np.random.choice([2, 3, 4, 5]))
+        special_ask = int(np.random.choice([2, 3, 4, 5]))
 
-        for i in range(1, 10):
+        for i in range(1, 11):
             b_px = round(mid - i * 0.05, 2)
             a_px = round(mid + i * 0.05, 2)
-            b_vol = int(np.clip(np.random.normal(120, 30), 50, 220))
-            a_vol = int(np.clip(np.random.normal(120, 30), 50, 220))
 
             is_b_block = (i == special_bid)
             is_a_block = (i == special_ask)
 
-            if is_b_block:
-                b_vol = int(np.random.uniform(700, 1200))
-            if is_a_block:
-                a_vol = int(np.random.uniform(750, 1300))
+            b_vol = int(np.random.uniform(700, 1400)) if is_b_block else int(np.random.uniform(80, 260))
+            a_vol = int(np.random.uniform(750, 1450)) if is_a_block else int(np.random.uniform(80, 260))
 
             bids.append({"price": b_px, "volume": b_vol, "is_block": is_b_block})
             asks.append({"price": a_px, "volume": a_vol, "is_block": is_a_block})
@@ -289,6 +303,10 @@ class SharedMarketEngine:
                             break
                     self.current_price = new_p
                     self.trade_tape.insert(0, {"time": now_str, "trader": trader_name, "side": "SELL", "price": new_p, "qty": qty, "type": "MKT"})
+
+                # REPOSICIÓN INMEDIATA DE LIQUIDEZ POR MARKET MAKERS
+                self.refresh_liquidity_locked()
+
             else:
                 target = limit_price or curr_px
                 if side == "BUY":
@@ -308,6 +326,58 @@ class SharedMarketEngine:
             self.trade_tape = self.trade_tape[:25]
             self._append_candle()
             return True, "Orden ejecutada"
+
+    def auto_market_maker_tick(self, force: bool = False):
+        """Genera transacciones continuas y órdenes límite por Market Makers automatizados para mantener el mercado activo."""
+        with self.lock:
+            if self.market_paused or not self.mm_enabled:
+                return
+
+            now = time.time()
+            if not force and (now - self.last_mm_tick < 1.0):
+                return
+
+            self.last_mm_tick = now
+
+            # Simular orden aleatoria de Market Maker / Fondo cuantitativo
+            bot_names = [
+                "MM_Citadel", "Quant_Bot", "Flow_Liquidity", "Jane_Street_Sim",
+                "Virtu_Trading", "Optiver_Algo", "Two_Sigma_Bot"
+            ]
+            trader = str(np.random.choice(bot_names))
+            side = str(np.random.choice(["BUY", "SELL"], p=[0.51, 0.49]))
+            qty = int(np.random.choice([35, 50, 80, 120, 160, 240, 450]))
+            is_market_order = (np.random.random() > 0.30)
+
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+
+            if is_market_order:
+                # Orden agresiva a mercado que absorbe liquidez y mueve precio
+                shock = float(np.random.normal(0.001, 0.035))
+                self.current_price = round(max(10.0, self.current_price + shock), 2)
+                t_price = self.current_price
+                t_type = "MKT"
+            else:
+                # Orden pasiva límite de cotización
+                offset = float(np.random.choice([0.05, 0.10, 0.15]))
+                t_price = round(self.current_price - offset if side == "BUY" else self.current_price + offset, 2)
+                t_type = "LMT"
+
+            self.trade_tape.insert(0, {
+                "time": now_str,
+                "trader": trader,
+                "side": side,
+                "price": t_price,
+                "qty": qty,
+                "type": t_type
+            })
+            self.trade_tape = self.trade_tape[:25]
+            self.total_trades_count += 1
+
+            # Reponer libro de órdenes con bloques institucionales y agregar vela
+            self.refresh_liquidity_locked()
+            self._append_candle()
+            self.version += 1
 
     def _append_candle(self):
         last = self.price_history[-1]
@@ -347,6 +417,10 @@ if "my_trader_id" not in st.session_state:
     st.session_state.my_trader_id = f"Operador_{np.random.randint(10, 99)}"
 
 market = get_shared_market()
+
+# Disparar actividad de Market Makers si no está pausado
+if not market.market_paused and market.mm_enabled:
+    market.auto_market_maker_tick()
 
 # ------------------------------------------------------------------------------
 # 4. SIMULACIÓN DE MONTE CARLO (10,000 TRAYECTORIAS VECTORIZADAS)
@@ -656,7 +730,7 @@ with m5:
 
 # Controles de Mercado Global
 st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
-c_pausa, c_reanuda, c_tick, c_sync, c_alias = st.columns([1.2, 1.2, 1.3, 2.0, 1.8])
+c_pausa, c_reanuda, c_burst, c_mm_tog, c_sync, c_alias = st.columns([1.1, 1.1, 1.4, 1.4, 1.6, 1.5])
 
 with c_pausa:
     if st.button("⏸️ Pausar Todo", use_container_width=True, disabled=market.market_paused):
@@ -673,13 +747,20 @@ with c_reanuda:
             market.version += 1
         st.rerun()
 
-with c_tick:
-    if st.button("⚡ Tick Colectivo", use_container_width=True, disabled=market.market_paused):
-        market.simulate_tick()
+with c_burst:
+    if st.button("⚡ Ráfaga MM (3)", use_container_width=True, disabled=market.market_paused):
+        for _ in range(3):
+            market.auto_market_maker_tick(force=True)
+        st.rerun()
+
+with c_mm_tog:
+    mm_status_txt = "🟢 MM Activo" if market.mm_enabled else "🔴 MM Pausa"
+    if st.button(f"🤖 {mm_status_txt}", use_container_width=True, disabled=market.market_paused):
+        market.mm_enabled = not market.mm_enabled
         st.rerun()
 
 with c_sync:
-    auto_refresh = st.checkbox("🔄 Auto-sincronizar pantalla (cada 3s)", value=True)
+    auto_refresh = st.checkbox("🔄 Auto-sincronizar (2.5s)", value=True)
 
 with c_alias:
     st.session_state.my_trader_id = st.text_input("Mi Alias / Nombre:", value=st.session_state.my_trader_id, max_chars=14)
@@ -912,7 +993,10 @@ with tab_theory:
         """)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Bucle opcional de sincronización automática en vivo si está habilitado
+# Bucle de sincronización automática en vivo si está habilitado
 if auto_refresh and not market.market_paused:
-    time.sleep(3)
+    time.sleep(2.5)
+    if market.mm_enabled:
+        market.auto_market_maker_tick(force=True)
     st.rerun()
+
