@@ -204,11 +204,26 @@ class SharedMarketEngine:
         self._bg_thread = threading.Thread(target=self._background_market_maker_worker, daemon=True)
         self._bg_thread.start()
 
+    @property
+    def mm_enabled(self):
+        return getattr(self, "_mm_enabled", True)
+
+    @mm_enabled.setter
+    def mm_enabled(self, val):
+        self._mm_enabled = bool(val)
+
+    def __getattr__(self, name):
+        if name in ("mm_enabled", "_mm_enabled"):
+            return True
+        if name == "last_mm_tick":
+            return 0.0
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
     def _background_market_maker_worker(self):
         """Genera órdenes y actualiza el libro continuamente en segundo plano."""
         while True:
             time.sleep(2.0)
-            if not self.market_paused and self.mm_enabled:
+            if not getattr(self, 'market_paused', False) and getattr(self, 'mm_enabled', True):
                 try:
                     self.auto_market_maker_tick(force=True)
                 except Exception:
@@ -330,7 +345,7 @@ class SharedMarketEngine:
     def auto_market_maker_tick(self, force: bool = False):
         """Genera transacciones continuas y órdenes límite por Market Makers automatizados para mantener el mercado activo."""
         with self.lock:
-            if self.market_paused or not self.mm_enabled:
+            if getattr(self, 'market_paused', False) or not getattr(self, 'mm_enabled', True):
                 return
 
             now = time.time()
@@ -410,17 +425,39 @@ def get_shared_market() -> SharedMarketEngine:
     return SharedMarketEngine()
 
 
+def get_synced_market() -> SharedMarketEngine:
+    """Obtiene la instancia compartida garantizando compatibilidad con instancias en caché previas de Streamlit."""
+    m = get_shared_market()
+    # Parches retroactivos seguros para instancias cacheadas previamente en memoria
+    if not hasattr(m, '_mm_enabled'):
+        m._mm_enabled = True
+    if not hasattr(m, 'last_mm_tick'):
+        m.last_mm_tick = 0.0
+    if not hasattr(m, 'market_paused'):
+        m.market_paused = False
+    if not hasattr(m, '_bg_thread') or not getattr(m._bg_thread, 'is_alive', lambda: False)():
+        try:
+            m._bg_thread = threading.Thread(target=m._background_market_maker_worker, daemon=True)
+            m._bg_thread.start()
+        except Exception:
+            pass
+    return m
+
+
 # ------------------------------------------------------------------------------
 # 3. IDENTIFICADOR LOCAL DEL USUARIO / OPERADOR
 # ------------------------------------------------------------------------------
 if "my_trader_id" not in st.session_state:
     st.session_state.my_trader_id = f"Operador_{np.random.randint(10, 99)}"
 
-market = get_shared_market()
+market = get_synced_market()
 
-# Disparar actividad de Market Makers si no está pausado
-if not market.market_paused and market.mm_enabled:
-    market.auto_market_maker_tick()
+# Disparar actividad de Market Makers de forma segura si no está pausado
+if not getattr(market, 'market_paused', False) and getattr(market, 'mm_enabled', True):
+    try:
+        market.auto_market_maker_tick()
+    except Exception:
+        pass
 
 # ------------------------------------------------------------------------------
 # 4. SIMULACIÓN DE MONTE CARLO (10,000 TRAYECTORIAS VECTORIZADAS)
@@ -754,9 +791,10 @@ with c_burst:
         st.rerun()
 
 with c_mm_tog:
-    mm_status_txt = "🟢 MM Activo" if market.mm_enabled else "🔴 MM Pausa"
+    is_mm_on = getattr(market, 'mm_enabled', True)
+    mm_status_txt = "🟢 MM Activo" if is_mm_on else "🔴 MM Pausa"
     if st.button(f"🤖 {mm_status_txt}", use_container_width=True, disabled=market.market_paused):
-        market.mm_enabled = not market.mm_enabled
+        market.mm_enabled = not is_mm_on
         st.rerun()
 
 with c_sync:
@@ -994,9 +1032,13 @@ with tab_theory:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Bucle de sincronización automática en vivo si está habilitado
-if auto_refresh and not market.market_paused:
+if auto_refresh and not getattr(market, 'market_paused', False):
     time.sleep(2.5)
-    if market.mm_enabled:
-        market.auto_market_maker_tick(force=True)
+    if getattr(market, 'mm_enabled', True):
+        try:
+            market.auto_market_maker_tick(force=True)
+        except Exception:
+            pass
     st.rerun()
+
 
