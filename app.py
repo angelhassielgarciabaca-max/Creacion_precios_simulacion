@@ -12,6 +12,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 # ------------------------------------------------------------------------------
 # 1. CONFIGURACIÓN DE PÁGINA Y ESTILO TERMINAL PREMIUM (IDÉNTICO A REACT)
@@ -394,7 +398,7 @@ class SharedMarketEngine:
                 return
 
             now = time.time()
-            if not force and (now - self.last_mm_tick < 0.4):
+            if not force and (now - self.last_mm_tick < 0.2):
                 return
             self.last_mm_tick = now
 
@@ -407,22 +411,25 @@ class SharedMarketEngine:
                 "Akuna_Capital_Bot", "Wintermute_Liquidity", "GSA_Capital_Algo",
                 "Point72_Quant_Bot", "Millennium_Algo_Flow"
             ]
-            trader = str(np.random.choice(bot_names))
-            side = str(np.random.choice(["BUY", "SELL"], p=[0.51, 0.49]))
-            qty = int(np.random.choice([50, 100, 150, 200, 300, 450]))
-            is_market = (np.random.random() > 0.3)
 
-            asks = sorted(self.order_book["asks"], key=lambda x: x["price"])
-            bids = sorted(self.order_book["bids"], key=lambda x: x["price"], reverse=True)
-            best_ask = asks[0]["price"] if asks else round(self.current_price + 0.05, 2)
-            best_bid = bids[0]["price"] if bids else round(self.current_price - 0.05, 2)
+            # Ejecutar 2 órdenes de Market Makers por tick para mayor dinamismo
+            for _ in range(2):
+                trader = str(np.random.choice(bot_names))
+                side = str(np.random.choice(["BUY", "SELL"], p=[0.52, 0.48]))
+                qty = int(np.random.choice([100, 200, 300, 450, 600]))
+                is_market = (np.random.random() > 0.25)
 
-            if is_market:
-                self.process_order(trader, side, "MARKET", qty)
-            else:
-                offset = float(np.random.choice([0.05, 0.10, 0.15, 0.20]))
-                limit_px = round(best_bid - offset if side == "BUY" else best_ask + offset, 2)
-                self.process_order(trader, side, "LIMIT", qty, limit_price=limit_px)
+                asks = sorted(self.order_book["asks"], key=lambda x: x["price"])
+                bids = sorted(self.order_book["bids"], key=lambda x: x["price"], reverse=True)
+                best_ask = asks[0]["price"] if asks else round(self.current_price + 0.05, 2)
+                best_bid = bids[0]["price"] if bids else round(self.current_price - 0.05, 2)
+
+                if is_market:
+                    self.process_order(trader, side, "MARKET", qty)
+                else:
+                    offset = float(np.random.choice([0.05, 0.10, 0.15, 0.20, 0.25]))
+                    limit_px = round(best_bid - offset if side == "BUY" else best_ask + offset, 2)
+                    self.process_order(trader, side, "LIMIT", qty, limit_price=limit_px)
 
     def _append_candle(self):
         last = self.price_history[-1]
@@ -837,6 +844,8 @@ with c_mm_tog:
 
 with c_sync:
     auto_refresh = st.checkbox("🔄 Auto-sincronizar (1.5s)", value=True)
+    if auto_refresh and st_autorefresh is not None and not market.market_paused:
+        st_autorefresh(interval=1500, limit=None, key="market_autorefresh")
 
 with c_alias:
     st.session_state.my_trader_id = st.text_input("Mi Alias / Nombre:", value=st.session_state.my_trader_id, max_chars=14)
@@ -1079,14 +1088,6 @@ with tab_theory:
         """)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Bucle de sincronización automática en vivo si está habilitado
-if auto_refresh and not getattr(market, 'market_paused', False):
-    time.sleep(1.2)
-    if getattr(market, 'mm_enabled', True):
-        try:
-            market.auto_market_maker_tick(force=True)
-        except Exception:
-            pass
-    safe_rerun()
+# Los Market Makers operan continuamente en segundo plano mediante hilos (background daemon thread) y actualización asíncrona.
 
 
