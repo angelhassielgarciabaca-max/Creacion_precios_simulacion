@@ -261,27 +261,34 @@ class SharedMarketEngine:
         ]
 
     def refresh_liquidity_locked(self):
-        """Mantiene 10 niveles de compra y 10 niveles de venta activos con volumen realista y bloques institucionales dinámicos."""
+        """Mantiene liquidez saludable en el libro preservando órdenes límite existentes."""
         mid = round(self.current_price, 2)
-        bids, asks = [], []
-        # Bloques institucionales dinámicos rotativos (niveles 2 a 5)
-        special_bid = int(np.random.choice([2, 3, 4, 5]))
-        special_ask = int(np.random.choice([2, 3, 4, 5]))
+        
+        current_bids = {b["price"]: b for b in self.order_book.get("bids", []) if b["volume"] > 0}
+        current_asks = {a["price"]: a for a in self.order_book.get("asks", []) if a["volume"] > 0}
 
+        # Asegurar 10 niveles de profundidad base
         for i in range(1, 11):
             b_px = round(mid - i * 0.05, 2)
             a_px = round(mid + i * 0.05, 2)
 
-            is_b_block = (i == special_bid)
-            is_a_block = (i == special_ask)
+            if b_px not in current_bids:
+                is_b_block = (i == int(np.random.choice([2, 3, 4])))
+                b_vol = int(np.random.uniform(700, 1300)) if is_b_block else int(np.random.uniform(90, 280))
+                current_bids[b_px] = {"price": b_px, "volume": b_vol, "is_block": is_b_block}
 
-            b_vol = int(np.random.uniform(700, 1400)) if is_b_block else int(np.random.uniform(80, 260))
-            a_vol = int(np.random.uniform(750, 1450)) if is_a_block else int(np.random.uniform(80, 260))
+            if a_px not in current_asks:
+                is_a_block = (i == int(np.random.choice([2, 3, 4])))
+                a_vol = int(np.random.uniform(700, 1300)) if is_a_block else int(np.random.uniform(90, 280))
+                current_asks[a_px] = {"price": a_px, "volume": a_vol, "is_block": is_a_block}
 
-            bids.append({"price": b_px, "volume": b_vol, "is_block": is_b_block})
-            asks.append({"price": a_px, "volume": a_vol, "is_block": is_a_block})
+        bids_list = list(current_bids.values())
+        asks_list = list(current_asks.values())
 
-        self.order_book = {"bids": bids, "asks": asks}
+        bids_list.sort(key=lambda x: x["price"], reverse=True)
+        asks_list.sort(key=lambda x: x["price"])
+
+        self.order_book = {"bids": bids_list[:14], "asks": asks_list[:14]}
 
     def process_order(self, trader_name: str, side: str, order_type: str, qty: int, limit_price: float = None):
         with self.lock:
@@ -289,14 +296,12 @@ class SharedMarketEngine:
                 return False, "Mercado pausado"
 
             now_str = datetime.datetime.now().strftime("%H:%M:%S")
-            # Ordenamiento estricto: asks ascendente (Mejor Ask primero), bids descendente (Mejor Bid primero)
             asks = sorted(self.order_book["asks"], key=lambda x: x["price"])
             bids = sorted(self.order_book["bids"], key=lambda x: x["price"], reverse=True)
             curr_px = self.current_price
 
             if order_type == "MARKET":
                 if side == "BUY":
-                    # COMPRA A MERCADO: Se ejecuta de inmediato contra el Mejor Ask (la oferta más baja)
                     rem = qty
                     total_spent = 0.0
                     shares_filled = 0
@@ -316,7 +321,6 @@ class SharedMarketEngine:
                         total_spent += rem * last_fill_px
                         shares_filled += rem
 
-                    # Precio promedio ponderado por volumen (VWAP)
                     avg_fill_px = round(total_spent / max(1, shares_filled), 2)
                     self.current_price = last_fill_px
                     self.trade_tape.insert(0, {
@@ -328,7 +332,6 @@ class SharedMarketEngine:
                         "type": "MKT"
                     })
                 else:
-                    # VENTA A MERCADO: Se ejecuta de inmediato contra el Mejor Bid (la demanda más alta)
                     rem = qty
                     total_received = 0.0
                     shares_filled = 0
@@ -348,7 +351,6 @@ class SharedMarketEngine:
                         total_received += rem * last_fill_px
                         shares_filled += rem
 
-                    # Precio promedio ponderado por volumen (VWAP)
                     avg_fill_px = round(total_received / max(1, shares_filled), 2)
                     self.current_price = last_fill_px
                     self.trade_tape.insert(0, {
@@ -360,18 +362,20 @@ class SharedMarketEngine:
                         "type": "MKT"
                     })
 
-                # Reposición inmediata de liquidez en el libro
+                # Limpiar niveles agotados y reponer liquidez
+                self.order_book["asks"] = [a for a in self.order_book["asks"] if a["volume"] > 0]
+                self.order_book["bids"] = [b for b in self.order_book["bids"] if b["volume"] > 0]
                 self.refresh_liquidity_locked()
 
             else:
                 target = limit_price or curr_px
                 if side == "BUY":
-                    if target >= (asks[0]["price"] if asks else 9999):
+                    if asks and target >= asks[0]["price"]:
                         return self.process_order(trader_name, "BUY", "MARKET", qty)
                     bids.append({"price": target, "volume": qty, "is_block": (qty >= 400)})
                     bids.sort(key=lambda x: x["price"], reverse=True)
                 else:
-                    if target <= (bids[0]["price"] if bids else 0):
+                    if bids and target <= bids[0]["price"]:
                         return self.process_order(trader_name, "SELL", "MARKET", qty)
                     asks.append({"price": target, "volume": qty, "is_block": (qty >= 400)})
                     asks.sort(key=lambda x: x["price"])
@@ -384,18 +388,16 @@ class SharedMarketEngine:
             return True, "Orden ejecutada"
 
     def auto_market_maker_tick(self, force: bool = False):
-        """Genera transacciones continuas y órdenes límite por 20 Market Makers automatizados."""
+        """Genera órdenes y transacciones continuas por los 20 Market Makers automatizados."""
         with self.lock:
             if getattr(self, 'market_paused', False) or not getattr(self, 'mm_enabled', True):
                 return
 
             now = time.time()
-            if not force and (now - self.last_mm_tick < 0.6):
+            if not force and (now - self.last_mm_tick < 0.4):
                 return
-
             self.last_mm_tick = now
 
-            # Pool extendido de 20 Market Makers y fondos cuantitativos HFT
             bot_names = [
                 "MM_Citadel_Securities", "Jane_Street_Capital", "Virtu_Financial_MM",
                 "Optiver_Derivatives", "Two_Sigma_Securities", "Jump_Trading_HFT",
@@ -407,47 +409,20 @@ class SharedMarketEngine:
             ]
             trader = str(np.random.choice(bot_names))
             side = str(np.random.choice(["BUY", "SELL"], p=[0.51, 0.49]))
-            qty = int(np.random.choice([30, 50, 75, 110, 160, 220, 400]))
-            is_market_order = (np.random.random() > 0.25) # 75% órdenes a mercado, 25% cotizaciones límite
-
-            now_str = datetime.datetime.now().strftime("%H:%M:%S")
+            qty = int(np.random.choice([50, 100, 150, 200, 300, 450]))
+            is_market = (np.random.random() > 0.3)
 
             asks = sorted(self.order_book["asks"], key=lambda x: x["price"])
             bids = sorted(self.order_book["bids"], key=lambda x: x["price"], reverse=True)
             best_ask = asks[0]["price"] if asks else round(self.current_price + 0.05, 2)
             best_bid = bids[0]["price"] if bids else round(self.current_price - 0.05, 2)
 
-            if is_market_order:
-                # COMPRA ejecuta consumiendo el Mejor Ask; VENTA ejecuta consumiendo el Mejor Bid
-                # Deslizamiento por volumen (slippage dinámico en ticks)
-                slippage = 0.05 if (qty >= 160 and np.random.random() > 0.4) else 0.0
-                if side == "BUY":
-                    t_price = round(best_ask + slippage, 2)
-                else:
-                    t_price = round(best_bid - slippage, 2)
-                self.current_price = round(max(10.0, t_price), 2)
-                t_type = "MKT"
+            if is_market:
+                self.process_order(trader, side, "MARKET", qty)
             else:
-                # Cotización pasiva de liquidez en el libro por Market Makers
-                offset = float(np.random.choice([0.05, 0.10, 0.15]))
-                t_price = round(self.current_price - offset if side == "BUY" else self.current_price + offset, 2)
-                t_type = "LMT"
-
-            self.trade_tape.insert(0, {
-                "time": now_str,
-                "trader": trader,
-                "side": side,
-                "price": t_price,
-                "qty": qty,
-                "type": t_type
-            })
-            self.trade_tape = self.trade_tape[:30]
-            self.total_trades_count += 1
-
-            # Reponer libro de órdenes con bloques institucionales rotativos y actualizar vela
-            self.refresh_liquidity_locked()
-            self._append_candle()
-            self.version += 1
+                offset = float(np.random.choice([0.05, 0.10, 0.15, 0.20]))
+                limit_px = round(best_bid - offset if side == "BUY" else best_ask + offset, 2)
+                self.process_order(trader, side, "LIMIT", qty, limit_price=limit_px)
 
     def _append_candle(self):
         last = self.price_history[-1]
