@@ -184,7 +184,7 @@ class SharedMarketEngine:
     y es visible inmediatamente para todos los demás participantes y el proyector.
     """
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.current_price = 100.00
         self.s0_frozen = 100.00
         self.market_paused = False
@@ -418,14 +418,17 @@ class SharedMarketEngine:
             best_bid = bids[0]["price"] if bids else round(self.current_price - 0.05, 2)
 
             if is_market_order:
-                # COMPRA ejecuta al Mejor Ask, VENTA ejecuta al Mejor Bid
-                exec_price = best_ask if side == "BUY" else best_bid
-                shock = float(np.random.normal(0.002 if side == "BUY" else -0.002, 0.03))
-                self.current_price = round(max(10.0, self.current_price + shock), 2)
-                t_price = exec_price
+                # COMPRA ejecuta consumiendo el Mejor Ask; VENTA ejecuta consumiendo el Mejor Bid
+                # Deslizamiento por volumen (slippage dinámico en ticks)
+                slippage = 0.05 if (qty >= 160 and np.random.random() > 0.4) else 0.0
+                if side == "BUY":
+                    t_price = round(best_ask + slippage, 2)
+                else:
+                    t_price = round(best_bid - slippage, 2)
+                self.current_price = round(max(10.0, t_price), 2)
                 t_type = "MKT"
             else:
-                # Cotización pasiva en el libro
+                # Cotización pasiva de liquidez en el libro por Market Makers
                 offset = float(np.random.choice([0.05, 0.10, 0.15]))
                 t_price = round(self.current_price - offset if side == "BUY" else self.current_price + offset, 2)
                 t_type = "LMT"
@@ -496,6 +499,14 @@ def get_synced_market() -> SharedMarketEngine:
     return m
 
 
+def safe_rerun():
+    """Rerun compatible con todas las versiones de Streamlit Community Cloud."""
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+
+
 # ------------------------------------------------------------------------------
 # 3. IDENTIFICADOR LOCAL DEL USUARIO / OPERADOR
 # ------------------------------------------------------------------------------
@@ -504,10 +515,10 @@ if "my_trader_id" not in st.session_state:
 
 market = get_synced_market()
 
-# Disparar actividad de Market Makers de forma segura si no está pausado
+# Disparar actividad de Market Makers continuamente y con fluidez
 if not getattr(market, 'market_paused', False) and getattr(market, 'mm_enabled', True):
     try:
-        market.auto_market_maker_tick()
+        market.auto_market_maker_tick(force=True)
     except Exception:
         pass
 
@@ -827,30 +838,30 @@ with c_pausa:
             market.market_paused = True
             market.s0_frozen = market.current_price
             market.version += 1
-        st.rerun()
+        safe_rerun()
 
 with c_reanuda:
     if st.button("▶️ Reanudar", use_container_width=True, disabled=not market.market_paused):
         with market.lock:
             market.market_paused = False
             market.version += 1
-        st.rerun()
+        safe_rerun()
 
 with c_burst:
     if st.button("⚡ Ráfaga MM (3)", use_container_width=True, disabled=market.market_paused):
         for _ in range(3):
             market.auto_market_maker_tick(force=True)
-        st.rerun()
+        safe_rerun()
 
 with c_mm_tog:
     is_mm_on = getattr(market, 'mm_enabled', True)
     mm_status_txt = "🟢 MM Activo" if is_mm_on else "🔴 MM Pausa"
     if st.button(f"🤖 {mm_status_txt}", use_container_width=True, disabled=market.market_paused):
         market.mm_enabled = not is_mm_on
-        st.rerun()
+        safe_rerun()
 
 with c_sync:
-    auto_refresh = st.checkbox("🔄 Auto-sincronizar (2.5s)", value=True)
+    auto_refresh = st.checkbox("🔄 Auto-sincronizar (1.5s)", value=True)
 
 with c_alias:
     st.session_state.my_trader_id = st.text_input("Mi Alias / Nombre:", value=st.session_state.my_trader_id, max_chars=14)
@@ -905,10 +916,7 @@ with tab_market:
             def_px = best_bid if is_buy_act else best_ask
             limit_val = st.number_input("Precio Límite ($):", value=float(round(def_px, 2)), step=0.05)
 
-        if is_mkt_act:
-            btn_txt = f"🟢 Comprar {qty_input} u. al Mejor Ask (${best_ask:.2f})" if is_buy_act else f"🔴 Vender {qty_input} u. al Mejor Bid (${best_bid:.2f})"
-        else:
-            btn_txt = f"🟢 Colocar Bid Límite de {qty_input} u. en ${limit_val:.2f}" if is_buy_act else f"🔴 Colocar Ask Límite de {qty_input} u. en ${limit_val:.2f}"
+        btn_txt = "🟢 Comprar" if is_buy_act else "🔴 Vender"
 
         if st.button(btn_txt, use_container_width=True, disabled=market.market_paused):
             clean_s = "BUY" if is_buy_act else "SELL"
@@ -916,7 +924,7 @@ with tab_market:
             success, msg = market.process_order(st.session_state.my_trader_id, clean_s, clean_t, int(qty_input), limit_val)
             if success:
                 st.success(f"¡Orden ejecutada como {st.session_state.my_trader_id}!")
-            st.rerun()
+            safe_rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
         # Libro de Órdenes L2 compartido
@@ -1104,6 +1112,6 @@ if auto_refresh and not getattr(market, 'market_paused', False):
             market.auto_market_maker_tick(force=True)
         except Exception:
             pass
-    st.rerun()
+    safe_rerun()
 
 
